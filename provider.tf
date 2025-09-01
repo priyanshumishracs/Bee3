@@ -17,6 +17,7 @@ provider "azurerm" {
     virtual_machine {
       delete_os_disk_on_deletion = true
     }
+    
   }
   # Credentials will come from Jenkins environment variables
   # ARM_CLIENT_ID, ARM_CLIENT_SECRET, ARM_TENANT_ID, ARM_SUBSCRIPTION_ID

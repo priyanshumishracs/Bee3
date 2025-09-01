@@ -1,38 +1,48 @@
+locals {
+  current_env = local.env_config[var.environment]
+  common_tags = merge(var.tags, {
+    Environment = var.environment
+    CreatedDate = formatdate("YYYY-MM-DD", timestamp())
+  })
 
+  vm_size         = "Standard_B1s"
+  os_disk_size_gb = 30
+}
 
 # Resource Group
-resource "azurerm_resource_group" "rg" {
-  name     = "${terraform.workspace}-${var.resource_group_name}"
+resource "azurerm_resource_group" "main" {
+  name     = "${var.environment}-enterprise-rg"
   location = var.location
+  tags     = local.common_tags
 }
 
-# Virtual Network 1
-resource "azurerm_virtual_network" "Vnet" {
-  name                ="${terraform.workspace}-${var.vnet_name}"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
-  address_space       = var.vnet_address_space
+resource "azurerm_virtual_network" "main" {
+  name                = "${var.environment}-vnet"
+  address_space       = [local.current_env.vnet_cidr]
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  tags                = local.common_tags
 }
 
-# Vnet1-Subnet1
-resource "azurerm_subnet" "subnet1" {
-  name                 = var.Vnet_subnet1_name
-  resource_group_name  = azurerm_resource_group.rg.name
-  virtual_network_name = azurerm_virtual_network.Vnet.name
-  address_prefixes     = [var.Vnet_subnet1_address_prefix]
+resource "azurerm_subnet" "app" {
+  name                 = "${var.environment}-app-subnet"
+  resource_group_name  = azurerm_resource_group.main.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = [local.current_env.app_subnet]
 }
 
-resource "azurerm_subnet" "subnet2" {
-  name                 = var.Vnet_subnet2_name
-  resource_group_name  = azurerm_resource_group.rg.name
-  virtual_network_name = azurerm_virtual_network.Vnet.name
-  address_prefixes     = [var.Vnet_subnet2_address_prefix]
+resource "azurerm_subnet" "db" {
+  name                 = "${var.environment}-db-subnet"
+  resource_group_name  = azurerm_resource_group.main.name
+  virtual_network_name = azurerm_virtual_network.main.name
+  address_prefixes     = [local.current_env.db_subnet]
 }
 
 resource "azurerm_network_security_group" "app" {
- name = "${terraform.workspace}_${length(var.Vm_names)}-nsg1"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  name                = "${var.environment}-app-nsg"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  tags                = local.common_tags
 
   security_rule {
     name                       = "HTTP"
@@ -84,9 +94,10 @@ resource "azurerm_network_security_group" "app" {
 }
 
 resource "azurerm_network_security_group" "db" {
-  name = "${terraform.workspace}_${length(var.Vm_names)}-nsg2"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
+  name                = "${var.environment}-db-nsg"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  tags                = local.common_tags
 
   security_rule {
     name                       = "SQL"
@@ -96,7 +107,7 @@ resource "azurerm_network_security_group" "db" {
     protocol                   = "Tcp"
     source_port_range          = "*"
     destination_port_range     = "1433"
-    source_address_prefix      = "*"
+    source_address_prefix      = local.current_env.app_subnet
     destination_address_prefix = "*"
   }
 
@@ -113,74 +124,106 @@ resource "azurerm_network_security_group" "db" {
   }
 }
 
-resource "azurerm_public_ip" "pub_ip" {
-  name                = "${terraform.workspace}-${var.public_ip_name}"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
-  allocation_method   = "Static"
-  sku                 = "Standard"
-}
-resource "azurerm_network_interface" "nic" {
-  count               = length(var.nic_name)  # ensures flexibility
-  name                = "${terraform.workspace}-${var.nic_name[count.index]}"
-  location            = azurerm_resource_group.rg.location
-  resource_group_name = azurerm_resource_group.rg.name
-  depends_on = [azurerm_subnet.subnet1, azurerm_subnet.subnet2]  # Ensure subnets exist first
-  
-  ip_configuration {
-    name                          = "internal"
-    subnet_id                     = count.index == 0 ? azurerm_subnet.subnet1.id : azurerm_subnet.subnet2.id
-    private_ip_address_allocation = "Dynamic"
-    public_ip_address_id          = count.index == 0 ? azurerm_public_ip.pub_ip.id : null
-  }
-
-}
-
-resource "azurerm_network_interface_security_group_association" "app_assoc" {
-  network_interface_id      = azurerm_network_interface.nic[0].id
+resource "azurerm_subnet_network_security_group_association" "app" {
+  subnet_id                 = azurerm_subnet.app.id
   network_security_group_id = azurerm_network_security_group.app.id
 }
 
-resource "azurerm_network_interface_security_group_association" "db_assoc" {
-  network_interface_id      = azurerm_network_interface.nic[1].id
+resource "azurerm_subnet_network_security_group_association" "db" {
+  subnet_id                 = azurerm_subnet.db.id
   network_security_group_id = azurerm_network_security_group.db.id
 }
 
+resource "azurerm_public_ip" "vm" {
+    for_each = {
+    for name, vm in local.current_env.vms :
+    name => vm if vm.type == "application"
+  }
+  name                = "${each.key}-pip"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  allocation_method   = "Static"
+  sku                 = "Standard"
+  tags                = local.common_tags
+}
+
+resource "azurerm_network_interface" "vm" {
+  for_each            = local.current_env.vms
+  name                = "${each.key}-nic"
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  tags                = local.common_tags
+
+  ip_configuration {
+    name                          = "internal"
+    subnet_id                     = each.value.type == "application" ? azurerm_subnet.app.id : azurerm_subnet.db.id
+    private_ip_address_allocation = "Dynamic"
+     # Attach Public IP ONLY for application VMs
+    public_ip_address_id = each.value.type == "application" ? azurerm_public_ip.vm[each.key].id : null
+  }
+}
+
 resource "random_password" "vm_password" {
-  count   = 2
   length  = 16
   special = true
   upper   = true
   lower   = true
   numeric = true
 }
+resource "azurerm_linux_virtual_machine" "vm" {
+  for_each            = local.current_env.vms
 
-resource "azurerm_linux_virtual_machine" "vms" {
-  count               = 2
-  name                = "${terraform.workspace}-${var.Vm_names[count.index]}"                                    #  "linuxvm-${count.index}"
-  resource_group_name = azurerm_resource_group.rg.name
-  location            = azurerm_resource_group.rg.location
-  size                = element(var.Vmsize, count.index)
+  name                = each.key
+  location            = azurerm_resource_group.main.location
+  resource_group_name = azurerm_resource_group.main.name
+  size                = local.vm_size
+  admin_username      = var.admin_username
+  admin_password      = random_password.vm_password.result
+  disable_password_authentication = false   # 👈 Important
+  network_interface_ids = [azurerm_network_interface.vm[each.key].id]
 
-  admin_username      = var.Vm_usernames[count.index] # Using the list of usernames for each VM
-  disable_password_authentication = false
- admin_password      = random_password.vm_password[count.index].result
-  
-  network_interface_ids = [azurerm_network_interface.nic[count.index].id]
-  
+  tags = merge(local.common_tags, {
+    Role    = each.value.type
+    License = "Open Source"
+  })
   os_disk {
-    name                 = element(var.Vms_os_disk_name, count.index)
     caching              = "ReadWrite"
-    storage_account_type = "Standard_LRS"                          # Standard HDD for OS disk
-    disk_size_gb         = element(var.Vm_os_disk_sizes, count.index) # Using element() to get the disk size from the list
+    storage_account_type = "Standard_LRS"
+    disk_size_gb         = local.os_disk_size_gb
   }
-  
+
    source_image_reference {
     publisher = "Canonical"
     offer     = "0001-com-ubuntu-server-focal"
     sku       = "20_04-lts"
     version   = "latest"
   }
+}
 
+output "resource_summary" {
+  value = {
+    resource_group = azurerm_resource_group.main.name
+    location       = var.location
+    environment    = var.environment
+    vnet_cidr      = local.current_env.vnet_cidr
+    app_subnet     = local.current_env.app_subnet
+    db_subnet      = local.current_env.db_subnet
+    vm_count       = length(local.current_env.vms)
+    vm_size        = local.vm_size
+    os_disk_size   = "${local.os_disk_size_gb}GB"
+    admin_password = random_password.vm_password.result
+  }
+  sensitive = true
+}
 
+output "vm_public_ips" {
+  value = {
+    for k, v in azurerm_public_ip.vm : k => v.ip_address
+  }
+}
+
+output "vm_private_ips" {
+  value = {
+    for k, v in azurerm_network_interface.vm : k => v.private_ip_address
+  }
 }
