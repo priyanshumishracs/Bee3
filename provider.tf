@@ -11,7 +11,12 @@ terraform {
     }
   }
 }
-
+backend "azurerm" {
+    resource_group_name  = "mohitRG"      # RG where storage account exists
+    storage_account_name = "teststorageaccount6267"     # Your storage account
+    container_name       = "pm-tf"              # Container to hold state
+    key                  = "terraform.tfstate"    # State file name
+  }
 provider "azurerm" {
   features {
     virtual_machine {
